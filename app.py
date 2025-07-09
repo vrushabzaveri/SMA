@@ -139,7 +139,10 @@ if st.button("🔍 Analyze"):
                 df[col] = 0
 
         volume_series = df['Volume']
-        if volume_series.isnull().all() or (volume_series == 0).all():
+        volume_missing = volume_series.isnull().all()
+        volume_zero = (volume_series == 0).all()
+
+        if bool(volume_missing) or bool(volume_zero):
             fallback_volume = fetch_alpha_vantage_volume(symbol_raw)
             if not fallback_volume.empty:
                 df = df.join(fallback_volume.rename("Volume_AV"), how="left")
