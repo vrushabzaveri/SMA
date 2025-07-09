@@ -3,7 +3,6 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import time
 import requests
 import plotly.graph_objects as go
 import feedparser
@@ -30,40 +29,40 @@ def flatten_series(series_like):
 def make_recommendation(current_price, predicted_price):
     change = ((predicted_price - current_price) / current_price) * 100
     if change > 5:
-        return "📈 Strong Buy", change, "High confidence in growth. You can consider buying."
+        return "\ud83d\udcc8 Strong Buy", change, "High confidence in growth. You can consider buying."
     elif change > 2:
-        return "📈 Buy", change, "The model suggests the stock may rise. You can consider buying."
+        return "\ud83d\udcc8 Buy", change, "The model suggests the stock may rise. You can consider buying."
     elif change < -5:
-        return "🔥 Strong Sell", change, "Sharp decline expected. Avoid or exit if holding."
+        return "\ud83d\udd25 Strong Sell", change, "Sharp decline expected. Avoid or exit if holding."
     elif change < -2:
-        return "📉 Sell", change, "Price might fall. Better avoid or sell if holding."
+        return "\ud83d\udcc9 Sell", change, "Price might fall. Better avoid or sell if holding."
     else:
-        return "🤝 Hold", change, "Not much change expected. Buying isn’t risky, but may not be rewarding either."
+        return "\ud83e\udd1d Hold", change, "Not much change expected. Buying isn’t risky, but may not be rewarding either."
 
 def r2_interpretation(score):
     if score <= 0:
-        return "❌ Poor"
+        return "\u274c Poor"
     elif score <= 0.3:
-        return "⚠️ Weak"
+        return "\u26a0\ufe0f Weak"
     elif score <= 0.5:
-        return "😐 Moderate"
+        return "\ud83d\ude10 Moderate"
     elif score <= 0.7:
-        return "👍 Decent"
+        return "\ud83d\udc4d Decent"
     elif score <= 0.9:
-        return "✅ Good"
+        return "\u2705 Good"
     elif score < 1.0:
-        return "🔑 Excellent"
+        return "\ud83d\udd11 Excellent"
     else:
-        return "🚀 Perfect (Possible Overfit)"
+        return "\ud83d\ude80 Perfect (Possible Overfit)"
 
 def get_sentiment(text):
     polarity = TextBlob(text).sentiment.polarity
     if polarity > 0.2:
-        return "🟢 Positive"
+        return "\ud83d\udfe2 Positive"
     elif polarity < -0.2:
-        return "🔴 Negative"
+        return "\ud83d\udd34 Negative"
     else:
-        return "🟡 Neutral"
+        return "\ud83d\udfe1 Neutral"
 
 def fetch_news(company_name):
     url = f"https://news.google.com/rss/search?q={company_name.replace(' ', '%20')}+stock&hl=en-IN&gl=IN&ceid=IN:en"
@@ -82,7 +81,7 @@ def fetch_alpha_vantage_volume(symbol_raw):
 
 # ------------------ STREAMLIT CONFIG ------------------
 st.set_page_config(page_title="ISA Forecast", layout="wide")
-st.title("📊 ISA Stock Forecasting")
+st.title("\ud83d\udcc8 ISA Stock Forecasting")
 
 @st.cache_data
 def fetch_static_stocks():
@@ -94,7 +93,7 @@ def fetch_static_stocks():
 
 stock_df = fetch_static_stocks()
 if stock_df.empty:
-    st.error("❌ Could not load NSE stock list.")
+    st.error("\u274c Could not load NSE stock list.")
     st.stop()
 
 company_options = stock_df[["NAME OF COMPANY", "SYMBOL"]].values.tolist()
@@ -107,32 +106,38 @@ end_date = st.date_input("End Date", pd.to_datetime("today"))
 
 st.markdown(f"**Selected Range:** `{start_date.strftime('%d/%m/%Y')} → {end_date.strftime('%d/%m/%Y')}`")
 
-if st.button("🔍 Analyze"):
+if st.button("\ud83d\udd0d Analyze"):
     progress_bar = st.progress(0)
     status = st.empty()
 
     # Step 1: Download
-    status.info("⏳ Step 1: Downloading stock data...")
+    status.info("\u23f3 Step 1: Downloading stock data...")
     df = yf.download(symbol, start=start_date, end=end_date)
     if df.empty:
-        st.error("⚠️ No data found.")
+        st.error("\u26a0\ufe0f No data found.")
         st.stop()
-    df = df[df.index.dayofweek < 5]  # remove weekends
+    df = df[df.index.dayofweek < 5]
     df.rename(columns={"Close": "Close", "Volume": "Volume"}, inplace=True)
 
-    # Step 2: Volume fallback
-    if "Volume" not in df.columns:
-        volume_missing = True
-    else:
-        volume_series = df["Volume"].copy()
-        try:
-            volume_missing = volume_series.isnull().all().item() or (volume_series == 0).all().item()
-        except:
-            volume_missing = True
+    if "Volume" not in df.columns or df["Volume"].isnull().all() or (df["Volume"] == 0).all():
+        status.warning("\u26a0\ufe0f Volume missing in yfinance. Fetching from Alpha Vantage...")
+        fallback_volume = fetch_alpha_vantage_volume(symbol_raw)
+        if not fallback_volume.empty:
+            df = df.join(fallback_volume.rename("Volume"), how="left", rsuffix="_av")
+            df["Volume"] = df["Volume"].fillna(df.get("Volume_av", 0))
+            df.drop(columns=["Volume_av"], inplace=True, errors="ignore")
+            st.success("\u2705 Volume filled from Alpha Vantage.")
+        else:
+            df["Volume"] = 0
+    df["Volume"] = np.log1p(flatten_series(df["Volume"]))
+    progress_bar.progress(20)
 
-    # Step 3: Indicators
-    status.info("📊 Step 2: Calculating indicators...")
-    close_series = df["Close"]
+    # Step 2: Indicators
+    status.info("\ud83d\udcca Step 2: Calculating indicators...")
+    close_series = df["Close"].copy()
+    if close_series.isnull().sum() > 0 or len(close_series.dropna()) < 20:
+        st.error("\ud83d\udea8 Not enough valid Close data to calculate indicators.")
+        st.stop()
     df["RSI"] = ta.momentum.RSIIndicator(close=close_series).rsi()
     macd = ta.trend.MACD(close=close_series)
     df["MACD"] = macd.macd()
@@ -144,8 +149,8 @@ if st.button("🔍 Analyze"):
     df.dropna(inplace=True)
     progress_bar.progress(40)
 
-    # Step 4: Scaling
-    status.info("💡 Step 3: Scaling features...")
+    # Step 3: Scaling
+    status.info("\ud83d\udca1 Step 3: Scaling features...")
     feature_cols = [col for col in df.columns if col != "Adj Close"]
     close_index = feature_cols.index("Close")
     data = df[feature_cols]
@@ -153,15 +158,15 @@ if st.button("🔍 Analyze"):
     scaled_data = scaler.fit_transform(data)
     progress_bar.progress(60)
 
-    # Step 5: Train/Test Split
-    status.info("📂 Step 4: Train-test split...")
+    # Step 4: Train-test split
+    status.info("\ud83d\udcc2 Step 4: Train-test split...")
     X = scaled_data[:-1]
     y = scaled_data[1:, close_index]
     X_train, X_test, y_train, y_test = train_test_split(X, y, shuffle=False, test_size=0.2)
     progress_bar.progress(70)
 
-    # Step 6: Modeling
-    status.info("🧠 Step 5: Training models...")
+    # Step 5: Modeling
+    status.info("\ud83e\udde0 Step 5: Training models...")
     models = {
         "SVM (Linear)": SVR(kernel="linear"),
         "SVM (RBF)": SVR(kernel="rbf"),
@@ -183,8 +188,8 @@ if st.button("🔍 Analyze"):
             best_score, best_model_name, best_model = r2, name, model
     progress_bar.progress(90)
 
-    # Step 7: Prediction
-    status.info("📈 Final prediction...")
+    # Step 6: Prediction
+    status.info("\ud83d\udcc8 Final prediction...")
     last_day = scaled_data[-1].reshape(1, -1)
     predicted_scaled = best_model.predict(last_day)[0]
     predicted_full = last_day.copy()
@@ -193,31 +198,28 @@ if st.button("🔍 Analyze"):
     current_price = float(df["Close"].iloc[-1])
     recommendation, change_pct, suggestion_text = make_recommendation(current_price, predicted_price)
     progress_bar.progress(100)
-    status.success("✅ Done!")
+    status.success("\u2705 Done!")
 
-    # Step 8: Plot
-    st.subheader("📊 Actual vs Predicted (Test Set)")
+    st.subheader("\ud83d\udcca Actual vs Predicted (Test Set)")
     fig = go.Figure()
     fig.add_trace(go.Scatter(y=y_test, mode="lines", name="Actual"))
     for name, pred in predictions.items():
         fig.add_trace(go.Scatter(y=pred, mode="lines", name=f"{name} ({scores[name]:.2f})"))
     st.plotly_chart(fig, use_container_width=True)
 
-    # Step 9: Summary
-    st.subheader("📋 Model Scores")
+    st.subheader("\ud83d\udccb Model Scores")
     for name, score in scores.items():
         st.markdown(f"**{name}** → R²: `{score:.2f}` → {r2_interpretation(score)}")
 
-    st.subheader("🔍 Final Recommendation")
+    st.subheader("\ud83d\udd0d Final Recommendation")
     st.markdown(f"**Best Model**: `{best_model_name}`")
     st.markdown(f"**Current Close Price**: `{current_price:.2f}`")
     st.markdown(f"**Predicted Next Close**: `{predicted_price:.2f}`")
     st.markdown(f"**Expected Change**: `{change_pct:.2f}%`")
     st.markdown(f"**Action**: {recommendation}")
-    st.info(f"💬 {suggestion_text}")
+    st.info(f"\ud83d\udcac {suggestion_text}")
 
-    # Step 10: News
-    st.subheader("📰 News Sentiment")
+    st.subheader("\ud83d\udcf0 News Sentiment")
     try:
         news_articles = fetch_news(selected_company[0])
         if not news_articles:
@@ -226,6 +228,6 @@ if st.button("🔍 Analyze"):
             for article in news_articles:
                 sentiment = get_sentiment(article.title)
                 st.markdown(f"**{sentiment}** [{article.title}]({article.link})")
-                st.caption(f"🗓 {getattr(article, 'published', 'Unknown')}")
+                st.caption(f"\ud83d\uddd3 {getattr(article, 'published', 'Unknown')}")
     except Exception as e:
-        st.error(f"❌ Failed to fetch news: {e}")
+        st.error(f"\u274c Failed to fetch news: {e}")
