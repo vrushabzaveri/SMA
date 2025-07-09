@@ -37,7 +37,7 @@ def make_recommendation(current_price, predicted_price):
     elif change < -2:
         return "🔴 Sell", change, "Price might fall. Better avoid or sell if holding."
     else:
-        return "⚪ Hold", change, "Not much change expected. Buying isn’t risky, but may not be rewarding either."
+        return "⚪ Hold", change, "Not much change expected. Buying isn't risky, but may not be rewarding either."
 
 def r2_interpretation(score):
     if score <= 0:
@@ -147,9 +147,15 @@ if st.button("🔍 Analyze"):
     # Step 2: Indicators
     status.info("📊 Step 2: Calculating indicators...")
     close_series = df["Close"].copy()
-    if close_series.isnull().sum() > 0 or len(close_series.dropna()) < 20:
+    
+    # FIX: Explicitly convert to Python boolean to avoid ValueError
+    has_null_values = bool(close_series.isnull().sum() > 0)
+    has_insufficient_data = bool(len(close_series.dropna()) < 20)
+    
+    if has_null_values or has_insufficient_data:
         st.error("🚨 Not enough valid Close data to calculate indicators.")
         st.stop()
+        
     df["RSI"] = ta.momentum.RSIIndicator(close=close_series).rsi()
     macd = ta.trend.MACD(close=close_series)
     df["MACD"] = macd.macd()
