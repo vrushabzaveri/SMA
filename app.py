@@ -125,7 +125,10 @@ if st.button("🔍 Analyze"):
         volume_missing = True
     else:
         volume_series = df["Volume"].copy()
-        volume_missing = volume_series.isnull().all() or (volume_series == 0).all()
+        try:
+            volume_missing = volume_series.isnull().all().item() or (volume_series == 0).all().item()
+        except:
+            volume_missing = True
 
     # Step 3: Indicators
     status.info("📊 Step 2: Calculating indicators...")
