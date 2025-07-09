@@ -121,19 +121,11 @@ if st.button("🔍 Analyze"):
     df.rename(columns={"Close": "Close", "Volume": "Volume"}, inplace=True)
 
     # Step 2: Volume fallback
-    volume_missing = "Volume" not in df.columns or df["Volume"].isnull().all() or (df["Volume"] == 0).all()
-    if volume_missing:
-        status.warning("⚠️ Volume missing in yfinance. Fetching from Alpha Vantage...")
-        fallback_volume = fetch_alpha_vantage_volume(symbol_raw)
-        if not fallback_volume.empty:
-            df = df.join(fallback_volume.rename("Volume"), how="left", rsuffix="_av")
-            df["Volume"] = df["Volume"].fillna(df.get("Volume_av", 0))
-            df.drop(columns=["Volume_av"], inplace=True, errors="ignore")
-            st.success("✅ Volume filled from Alpha Vantage.")
-        else:
-            df["Volume"] = 0
-    df["Volume"] = np.log1p(flatten_series(df["Volume"]))
-    progress_bar.progress(20)
+    if "Volume" not in df.columns:
+        volume_missing = True
+    else:
+        volume_series = df["Volume"].copy()
+        volume_missing = volume_series.isnull().all() or (volume_series == 0).all()
 
     # Step 3: Indicators
     status.info("📊 Step 2: Calculating indicators...")
