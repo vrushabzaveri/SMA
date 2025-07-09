@@ -127,7 +127,14 @@ if st.button("🔍 Analyze"):
     df["MACD"] = macd.macd().squeeze()
     df["MACD_Signal"] = macd.macd_signal().squeeze()
     df["Change %"] = close_series.pct_change() * 100
-    df["Volume"] = np.log1p(flatten_series(df.get(f"Volume_{symbol_raw}.NS", df["Volume"])))
+    volume_col = f"Volume_{symbol_raw}.NS"
+    if volume_col in df.columns:
+        df["Volume"] = np.log1p(flatten_series(df[volume_col]))
+    elif "Volume" in df.columns:
+        df["Volume"] = np.log1p(flatten_series(df["Volume"]))
+    else:
+        st.warning("⚠️ Volume data not found. Using zero volume.")
+        df["Volume"] = 0  # or np.nan, depending on what your model expects
 
     for period in [5, 10, 20, 50, 100, 200]:
         df[f"SMA_{period}"] = ta.trend.sma_indicator(close_series, window=period).squeeze()
