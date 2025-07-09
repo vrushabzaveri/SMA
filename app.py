@@ -148,12 +148,21 @@ if st.button("🔍 Analyze"):
     status.info("📊 Step 2: Calculating indicators...")
     close_series = df["Close"].copy()
     
-    # FIX: Explicitly convert to Python boolean to avoid ValueError
-    has_null_values = bool(close_series.isnull().sum() > 0)
-    has_insufficient_data = bool(len(close_series.dropna()) < 20)
-    
-    if has_null_values or has_insufficient_data:
-        st.error("🚨 Not enough valid Close data to calculate indicators.")
+    # FIX: Use the most robust approach to avoid any pandas boolean ambiguity
+    try:
+        # Check for null values using .any() method
+        has_null_values = close_series.isnull().any()
+        
+        # Check for insufficient data
+        valid_data_count = len(close_series.dropna())
+        has_insufficient_data = valid_data_count < 20
+        
+        # Use Python's built-in any() for extra safety
+        if any([has_null_values, has_insufficient_data]):
+            st.error("🚨 Not enough valid Close data to calculate indicators.")
+            st.stop()
+    except Exception as e:
+        st.error(f"Error checking data validity: {e}")
         st.stop()
         
     df["RSI"] = ta.momentum.RSIIndicator(close=close_series).rsi()
