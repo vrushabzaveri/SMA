@@ -11,7 +11,6 @@ from sklearn.svm import SVR
 from sklearn.neural_network import MLPRegressor
 from sklearn.model_selection import train_test_split
 import plotly.graph_objects as go
-from datetime import datetime
 from textblob import TextBlob
 import feedparser
 import ta
@@ -101,6 +100,20 @@ end_date = st.date_input("End Date", pd.to_datetime("today"))
 
 st.markdown(f"**Selected Range:** `{start_date.strftime('%d/%m/%Y')} → {end_date.strftime('%d/%m/%Y')}`")
 
+# ---------- Scaler Reset Logic ----------
+if "last_selected_symbol" not in st.session_state:
+    st.session_state.last_selected_symbol = ""
+
+if st.session_state.last_selected_symbol != symbol:
+    st.session_state.last_selected_symbol = symbol
+    st.session_state.scaler = None
+    st.success("🧹 Scaler reset for new stock.")
+
+if st.button("🗑️ Manually Reset Scaler"):
+    st.session_state.scaler = None
+    st.success("✅ Scaler manually reset.")
+
+# ---------- Analyze ----------
 if st.button("🔍 Analyze"):
     start_time = time.time()
     progress_bar = st.progress(0)
@@ -152,6 +165,7 @@ if st.button("🔍 Analyze"):
 
     scaler = MinMaxScaler()
     scaler.fit(data)
+    st.session_state.scaler = scaler
     scaled_data = scaler.transform(data)
     progress_bar.progress(50)
 
