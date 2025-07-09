@@ -29,15 +29,15 @@ def flatten_series(series_like):
 def make_recommendation(current_price, predicted_price):
     change = ((predicted_price - current_price) / current_price) * 100
     if change > 5:
-        return "\ud83d\udcc8 Strong Buy", change, "High confidence in growth. You can consider buying."
+        return " Strong Buy", change, "High confidence in growth. You can consider buying."
     elif change > 2:
-        return "\ud83d\udcc8 Buy", change, "The model suggests the stock may rise. You can consider buying."
+        return " Buy", change, "The model suggests the stock may rise. You can consider buying."
     elif change < -5:
-        return "\ud83d\udd25 Strong Sell", change, "Sharp decline expected. Avoid or exit if holding."
+        return "Strong Sell", change, "Sharp decline expected. Avoid or exit if holding."
     elif change < -2:
-        return "\ud83d\udcc9 Sell", change, "Price might fall. Better avoid or sell if holding."
+        return " Sell", change, "Price might fall. Better avoid or sell if holding."
     else:
-        return "\ud83e\udd1d Hold", change, "Not much change expected. Buying isn’t risky, but may not be rewarding either."
+        return " Hold", change, "Not much change expected. Buying isn’t risky, but may not be rewarding either."
 
 def r2_interpretation(score):
     if score <= 0:
@@ -106,7 +106,7 @@ end_date = st.date_input("End Date", pd.to_datetime("today"))
 
 st.markdown(f"**Selected Range:** `{start_date.strftime('%d/%m/%Y')} → {end_date.strftime('%d/%m/%Y')}`")
 
-if st.button("\ud83d\udd0d Analyze"):
+if st.button(" Analyze"):
     progress_bar = st.progress(0)
     status = st.empty()
 
