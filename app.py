@@ -1,8 +1,13 @@
+# isa_forecast_app.py
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import time
+import requests
+import plotly.graph_objects as go
+import feedparser
+from textblob import TextBlob
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import r2_score
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
@@ -10,16 +15,11 @@ from sklearn.linear_model import LinearRegression
 from sklearn.svm import SVR
 from sklearn.neural_network import MLPRegressor
 from sklearn.model_selection import train_test_split
-import plotly.graph_objects as go
-from textblob import TextBlob
-import feedparser
 import ta
-import requests
 
-# Alpha Vantage Key
 ALPHA_VANTAGE_KEY = "HNU1UUHL9351CEWZ"
 
-# ---------- HELPER FUNCTIONS ----------
+# ------------------ UTILS ------------------
 def flatten_series(series_like):
     if isinstance(series_like, pd.DataFrame):
         return series_like.iloc[:, 0]
@@ -70,32 +70,31 @@ def fetch_news(company_name):
     return feedparser.parse(url).entries[:5]
 
 def fetch_alpha_vantage_volume(symbol_raw):
-    url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol={symbol_raw}.NS&outputsize=full&apikey={ALPHA_VANTAGE_KEY}"
-    r = requests.get(url)
-    data = r.json()
-    if "Time Series (Daily)" not in data:
-        return pd.Series()
-    df = pd.DataFrame(data["Time Series (Daily)"]).T
-    df.index = pd.to_datetime(df.index)
-    df.sort_index(inplace=True)
-    return df["6. volume"].astype(float)
+    try:
+        url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol={symbol_raw}.NS&outputsize=full&apikey={ALPHA_VANTAGE_KEY}&datatype=csv"
+        df = pd.read_csv(url)
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df.set_index("timestamp", inplace=True)
+        df.sort_index(inplace=True)
+        return df["volume"]
+    except:
+        return pd.Series(dtype="float64")
 
-# ---------- CONFIG ----------
+# ------------------ STREAMLIT CONFIG ------------------
 st.set_page_config(page_title="ISA Forecast", layout="wide")
 st.title("📊 ISA Stock Forecasting")
 
-# Load company list
 @st.cache_data
 def fetch_static_stocks():
     try:
         df = pd.read_csv("nse_stocks.csv")
         return df[["SYMBOL", "NAME OF COMPANY"]].dropna()
-    except Exception as e:
-        st.error(f"❌ Failed to load stock list: {e}")
+    except:
         return pd.DataFrame(columns=["SYMBOL", "NAME OF COMPANY"])
 
 stock_df = fetch_static_stocks()
 if stock_df.empty:
+    st.error("❌ Could not load NSE stock list.")
     st.stop()
 
 company_options = stock_df[["NAME OF COMPANY", "SYMBOL"]].values.tolist()
@@ -112,27 +111,31 @@ if st.button("🔍 Analyze"):
     progress_bar = st.progress(0)
     status = st.empty()
 
-    # Step 1: Download Data
+    # Step 1: Download
     status.info("⏳ Step 1: Downloading stock data...")
     df = yf.download(symbol, start=start_date, end=end_date)
     if df.empty:
         st.error("⚠️ No data found.")
         st.stop()
-    df = df[df.index.dayofweek < 5]
-    df = df.rename(columns={"Close": "Close", "Volume": "Volume"})
+    df = df[df.index.dayofweek < 5]  # remove weekends
+    df.rename(columns={"Close": "Close", "Volume": "Volume"}, inplace=True)
 
-    # Fallback volume
-    if df["Volume"].isnull().all() or (df["Volume"] == 0).all():
-        st.warning("⚠️ Volume data not found in yfinance. Fetching from Alpha Vantage...")
+    # Step 2: Volume fallback
+    volume_missing = "Volume" not in df.columns or df["Volume"].isnull().all() or (df["Volume"] == 0).all()
+    if volume_missing:
+        status.warning("⚠️ Volume missing in yfinance. Fetching from Alpha Vantage...")
         fallback_volume = fetch_alpha_vantage_volume(symbol_raw)
-        df = df.join(fallback_volume.rename("Volume"), how="left", rsuffix="_av")
-        df["Volume"] = df["Volume"].fillna(df["Volume_av"])
-        df.drop(columns=["Volume_av"], inplace=True, errors="ignore")
+        if not fallback_volume.empty:
+            df = df.join(fallback_volume.rename("Volume"), how="left", rsuffix="_av")
+            df["Volume"] = df["Volume"].fillna(df.get("Volume_av", 0))
+            df.drop(columns=["Volume_av"], inplace=True, errors="ignore")
+            st.success("✅ Volume filled from Alpha Vantage.")
+        else:
+            df["Volume"] = 0
     df["Volume"] = np.log1p(flatten_series(df["Volume"]))
-
     progress_bar.progress(20)
 
-    # Step 2: Indicators
+    # Step 3: Indicators
     status.info("📊 Step 2: Calculating indicators...")
     close_series = df["Close"]
     df["RSI"] = ta.momentum.RSIIndicator(close=close_series).rsi()
@@ -144,26 +147,25 @@ if st.button("🔍 Analyze"):
         df[f"SMA_{period}"] = ta.trend.sma_indicator(close_series, window=period)
         df[f"EMA_{period}"] = ta.trend.ema_indicator(close_series, window=period)
     df.dropna(inplace=True)
-    progress_bar.progress(35)
+    progress_bar.progress(40)
 
-    # Step 3: Scaling
+    # Step 4: Scaling
     status.info("💡 Step 3: Scaling features...")
     feature_cols = [col for col in df.columns if col != "Adj Close"]
     close_index = feature_cols.index("Close")
     data = df[feature_cols]
     scaler = MinMaxScaler()
-    scaler.fit(data)
-    scaled_data = scaler.transform(data)
-    progress_bar.progress(50)
+    scaled_data = scaler.fit_transform(data)
+    progress_bar.progress(60)
 
-    # Step 4: Train-test split
-    status.info("📂 Step 4: Splitting data...")
+    # Step 5: Train/Test Split
+    status.info("📂 Step 4: Train-test split...")
     X = scaled_data[:-1]
     y = scaled_data[1:, close_index]
     X_train, X_test, y_train, y_test = train_test_split(X, y, shuffle=False, test_size=0.2)
-    progress_bar.progress(65)
+    progress_bar.progress(70)
 
-    # Step 5: Model training
+    # Step 6: Modeling
     status.info("🧠 Step 5: Training models...")
     models = {
         "SVM (Linear)": SVR(kernel="linear"),
@@ -173,8 +175,9 @@ if st.button("🔍 Analyze"):
         "Gradient Boosting": GradientBoostingRegressor(),
         "ANN (MLP)": MLPRegressor(hidden_layer_sizes=(64, 64), max_iter=500),
     }
-    predictions, scores = {}, {}
     best_score, best_model_name, best_model = -np.inf, None, None
+    predictions, scores = {}, {}
+
     for name, model in models.items():
         model.fit(X_train, y_train)
         pred = model.predict(X_test)
@@ -183,9 +186,9 @@ if st.button("🔍 Analyze"):
         scores[name] = r2
         if r2 > best_score:
             best_score, best_model_name, best_model = r2, name, model
-    progress_bar.progress(85)
+    progress_bar.progress(90)
 
-    # Step 6: Final Prediction
+    # Step 7: Prediction
     status.info("📈 Final prediction...")
     last_day = scaled_data[-1].reshape(1, -1)
     predicted_scaled = best_model.predict(last_day)[0]
@@ -197,16 +200,15 @@ if st.button("🔍 Analyze"):
     progress_bar.progress(100)
     status.success("✅ Done!")
 
-    # Step 7: Plot
+    # Step 8: Plot
     st.subheader("📊 Actual vs Predicted (Test Set)")
     fig = go.Figure()
     fig.add_trace(go.Scatter(y=y_test, mode="lines", name="Actual"))
     for name, pred in predictions.items():
         fig.add_trace(go.Scatter(y=pred, mode="lines", name=f"{name} ({scores[name]:.2f})"))
-    fig.update_layout(title="Actual vs Predicted", height=500)
     st.plotly_chart(fig, use_container_width=True)
 
-    # Step 8: Summary
+    # Step 9: Summary
     st.subheader("📋 Model Scores")
     for name, score in scores.items():
         st.markdown(f"**{name}** → R²: `{score:.2f}` → {r2_interpretation(score)}")
@@ -219,7 +221,7 @@ if st.button("🔍 Analyze"):
     st.markdown(f"**Action**: {recommendation}")
     st.info(f"💬 {suggestion_text}")
 
-    # News
+    # Step 10: News
     st.subheader("📰 News Sentiment")
     try:
         news_articles = fetch_news(selected_company[0])
