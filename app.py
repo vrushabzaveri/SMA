@@ -146,38 +146,59 @@ if st.button("🔍 Analyze"):
 
     # Step 2: Indicators
     status.info("📊 Step 2: Calculating indicators...")
-    close_series = df["Close"].copy()
     
-    # FIX: Most robust approach - avoid pandas boolean operations entirely
+    # FIX: Ensure close_series is properly formatted for ta library
     try:
-        # Convert to numpy array to avoid pandas boolean issues
+        # Get the Close column and ensure it's a proper pandas Series
+        close_series = df["Close"].copy()
+        
+        # Ensure we have a proper pandas Series with numeric data
+        if not isinstance(close_series, pd.Series):
+            close_series = pd.Series(close_series)
+        
+        # Convert to numeric, coercing errors to NaN
+        close_series = pd.to_numeric(close_series, errors='coerce')
+        
+        # Reset index to ensure proper Series format
+        close_series = close_series.reset_index(drop=True)
+        
+        # Convert to numpy array to avoid pandas boolean issues for validation
         close_values = close_series.values
         
         # Check for null values using numpy
         has_null_values = bool(np.isnan(close_values).any())
         
-        # Check for insufficient data
-        valid_mask = ~np.isnan(close_values)
-        valid_data_count = np.sum(valid_mask)
+        # Check for insufficient data after cleaning
+        clean_close = close_series.dropna()
+        valid_data_count = len(clean_close)
         has_insufficient_data = bool(valid_data_count < 20)
         
         # Now use standard Python boolean logic
         if has_null_values or has_insufficient_data:
-            st.error("🚨 Not enough valid Close data to calculate indicators.")
+            st.error(f"🚨 Not enough valid Close data to calculate indicators. Valid data points: {valid_data_count}")
             st.stop()
+        
+        # Use the cleaned close series for calculations
+        # Create a temporary dataframe with the same index as the original
+        temp_df = df.copy()
+        temp_close = temp_df["Close"].fillna(method='ffill').fillna(method='bfill')
+        
+        # Calculate technical indicators with proper error handling
+        df["RSI"] = ta.momentum.RSIIndicator(close=temp_close).rsi()
+        macd = ta.trend.MACD(close=temp_close)
+        df["MACD"] = macd.macd()
+        df["MACD_Signal"] = macd.macd_signal()
+        df["Change %"] = temp_close.pct_change() * 100
+        
+        for period in [5, 10, 20, 50, 100, 200]:
+            df[f"SMA_{period}"] = ta.trend.sma_indicator(temp_close, window=period)
+            df[f"EMA_{period}"] = ta.trend.ema_indicator(temp_close, window=period)
             
     except Exception as e:
-        st.error(f"Error checking data validity: {e}")
+        st.error(f"Error calculating technical indicators: {e}")
+        st.error("This might be due to insufficient data or data format issues.")
         st.stop()
         
-    df["RSI"] = ta.momentum.RSIIndicator(close=close_series).rsi()
-    macd = ta.trend.MACD(close=close_series)
-    df["MACD"] = macd.macd()
-    df["MACD_Signal"] = macd.macd_signal()
-    df["Change %"] = close_series.pct_change() * 100
-    for period in [5, 10, 20, 50, 100, 200]:
-        df[f"SMA_{period}"] = ta.trend.sma_indicator(close_series, window=period)
-        df[f"EMA_{period}"] = ta.trend.ema_indicator(close_series, window=period)
     df.dropna(inplace=True)
     progress_bar.progress(40)
 
