@@ -1,0 +1,11 @@
+streamlit
+yfinance
+pandas
+numpy
+scikit-learn
+joblib
+plotly
+textblob
+feedparser
+ta
+holidays
