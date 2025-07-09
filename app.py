@@ -148,19 +148,24 @@ if st.button("🔍 Analyze"):
     status.info("📊 Step 2: Calculating indicators...")
     close_series = df["Close"].copy()
     
-    # FIX: Use the most robust approach to avoid any pandas boolean ambiguity
+    # FIX: Most robust approach - avoid pandas boolean operations entirely
     try:
-        # Check for null values using .any() method
-        has_null_values = close_series.isnull().any()
+        # Convert to numpy array to avoid pandas boolean issues
+        close_values = close_series.values
+        
+        # Check for null values using numpy
+        has_null_values = bool(np.isnan(close_values).any())
         
         # Check for insufficient data
-        valid_data_count = len(close_series.dropna())
-        has_insufficient_data = valid_data_count < 20
+        valid_mask = ~np.isnan(close_values)
+        valid_data_count = np.sum(valid_mask)
+        has_insufficient_data = bool(valid_data_count < 20)
         
-        # Use Python's built-in any() for extra safety
-        if any([has_null_values, has_insufficient_data]):
+        # Now use standard Python boolean logic
+        if has_null_values or has_insufficient_data:
             st.error("🚨 Not enough valid Close data to calculate indicators.")
             st.stop()
+            
     except Exception as e:
         st.error(f"Error checking data validity: {e}")
         st.stop()
