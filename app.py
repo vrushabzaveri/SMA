@@ -32,28 +32,23 @@ def flatten_series(series_like):
 def get_close_column(df, symbol):
     possible_cols = [col for col in df.columns if f"Close_{symbol}" in str(col)]
     if not possible_cols:
-        st.error(
-            f"❌ Could not find a Close column for {symbol}. Found columns: {', '.join(map(str, df.columns))}"
-        )
+        st.error(f"❌ Could not find a Close column for {symbol}. Found columns: {', '.join(map(str, df.columns))}")
         st.stop()
     return possible_cols[0]
 
 
-# --------- Config ---------
-st.set_page_config(page_title="ISA", layout="wide")
-st.title("ISA Forecast")
-SCALER_PATH = "scaler.gz"
-CSV_PATH = "nse_stocks.csv"
-
-
-@st.cache_data
-def fetch_static_stocks():
-    try:
-        df = pd.read_csv(CSV_PATH)
-        return df[["SYMBOL", "NAME OF COMPANY"]].dropna()
-    except Exception as e:
-        st.error(f"❌ Failed to load nse_stocks.csv: {e}")
-        return pd.DataFrame(columns=["SYMBOL", "NAME OF COMPANY"])
+def make_recommendation(current_price, predicted_price):
+    change = ((predicted_price - current_price) / current_price) * 100
+    if change > 5:
+        return "📈 Strong Buy", change, "High confidence in growth. You can consider buying."
+    elif change > 2:
+        return "📈 Buy", change, "The model suggests the stock may rise. You can consider buying."
+    elif change < -5:
+        return "🔥 Strong Sell", change, "Sharp decline expected. Avoid or exit if holding."
+    elif change < -2:
+        return "📉 Sell", change, "Price might fall. Better avoid or sell if holding."
+    else:
+        return "🤝 Hold", change, "Not much change expected. Buying isn’t risky, but may not be rewarding either."
 
 
 def r2_interpretation(score):
@@ -73,16 +68,6 @@ def r2_interpretation(score):
         return "🚀 Perfect (Possible overfit)"
 
 
-def make_recommendation(current_price, predicted_price):
-    change = ((predicted_price - current_price) / current_price) * 100
-    if change > 2:
-        return "📈 Buy", change
-    elif change < -2:
-        return "📉 Sell", change
-    else:
-        return "🤝 Hold", change
-
-
 def get_sentiment(text):
     polarity = TextBlob(text).sentiment.polarity
     if polarity > 0.2:
@@ -98,23 +83,40 @@ def fetch_news(company_name):
     return feedparser.parse(url).entries[:5]
 
 
+# --------- Config ---------
+st.set_page_config(page_title="ISA", layout="wide")
+st.title("ISA Forecast")
+SCALER_PATH = "scaler.gz"
+CSV_PATH = "nse_stocks.csv"
+
+
+@st.cache_data
+def fetch_static_stocks():
+    try:
+        df = pd.read_csv(CSV_PATH)
+        return df[["SYMBOL", "NAME OF COMPANY"]].dropna()
+    except Exception as e:
+        st.error(f"❌ Failed to load nse_stocks.csv: {e}")
+        return pd.DataFrame(columns=["SYMBOL", "NAME OF COMPANY"])
+
+
 # --------- UI ---------
 stock_df = fetch_static_stocks()
 if stock_df.empty:
     st.stop()
 
 company_options = stock_df[["NAME OF COMPANY", "SYMBOL"]].values.tolist()
-selected_company = st.selectbox(
-    "Choose a Company", company_options, format_func=lambda x: x[0]
-)
+selected_company = st.selectbox("Choose a Company", company_options, format_func=lambda x: x[0])
 symbol = selected_company[1] + ".NS"
 symbol_raw = selected_company[1]
 
+# Always reset the scaler cache on new stock selection
+if os.path.exists(SCALER_PATH):
+    os.remove(SCALER_PATH)
+
 start_date = st.date_input("Start Date", pd.to_datetime("2010-01-01"))
 end_date = st.date_input("End Date", pd.to_datetime("today"))
-st.markdown(
-    f"**Selected Range:** `{start_date.strftime('%d/%m/%Y')} → {end_date.strftime('%d/%m/%Y')}`"
-)
+st.markdown(f"**Selected Range:** `{start_date.strftime('%d/%m/%Y')} → {end_date.strftime('%d/%m/%Y')}`")
 
 if st.button("🗑️ Reset Scaler Cache"):
     if os.path.exists(SCALER_PATH):
@@ -130,9 +132,7 @@ if st.button("🔍 Analyze"):
     # Step 1: Download
     status.info("⏳ Step 1: Downloading stock data...")
     df = yf.download(symbol, start=start_date, end=end_date)
-    df.columns = [
-        "_".join(col).strip() if isinstance(col, tuple) else col for col in df.columns
-    ]
+    df.columns = ["_".join(col).strip() if isinstance(col, tuple) else col for col in df.columns]
     df = df[df.index.dayofweek < 5]
     if df.empty:
         st.error("⚠️ No data available.")
@@ -150,15 +150,11 @@ if st.button("🔍 Analyze"):
     df["MACD"] = macd.macd().squeeze()
     df["MACD_Signal"] = macd.macd_signal().squeeze()
     df["Change %"] = close_series.pct_change() * 100
-    df["Volume"] = np.log1p(flatten_series(df[f"Volume_{symbol_raw}.NS"]))
+    df["Volume"] = np.log1p(flatten_series(df.get(f"Volume_{symbol_raw}.NS", df["Volume"])))
 
     for period in [5, 10, 20, 50, 100, 200]:
-        df[f"SMA_{period}"] = ta.trend.sma_indicator(
-            close_series, window=period
-        ).squeeze()
-        df[f"EMA_{period}"] = ta.trend.ema_indicator(
-            close_series, window=period
-        ).squeeze()
+        df[f"SMA_{period}"] = ta.trend.sma_indicator(close_series, window=period).squeeze()
+        df[f"EMA_{period}"] = ta.trend.ema_indicator(close_series, window=period).squeeze()
 
     df.dropna(inplace=True)
     progress_bar.progress(30)
@@ -168,22 +164,33 @@ if st.button("🔍 Analyze"):
     feature_cols = [col for col in df.columns if col not in ["Adj Close"]]
     close_index = feature_cols.index("Close")
     data = df[feature_cols]
-    scaler = (
-        joblib.load(SCALER_PATH)
-        if os.path.exists(SCALER_PATH)
-        else MinMaxScaler().fit(data)
-    )
-    joblib.dump(scaler, SCALER_PATH)
-    scaled_data = scaler.transform(data)
+
+    # Validate data before scaling
+    if data is None or data.empty:
+        st.error("🚨 Data is empty. Cannot scale.")
+        st.stop()
+    if data.isnull().values.any():
+        st.error("🚨 Data contains NaNs. Cannot scale.")
+        st.stop()
+    if not np.isfinite(data.to_numpy()).all():
+        st.error("🚨 Data contains infinite values. Cannot scale.")
+        st.stop()
+
+    try:
+        scaler = MinMaxScaler()
+        scaler.fit(data)
+        joblib.dump(scaler, SCALER_PATH)
+        scaled_data = scaler.transform(data)
+    except Exception as e:
+        st.error(f"❌ Failed to scale data: {e}")
+        st.stop()
     progress_bar.progress(45)
 
     # Step 4: Split
     status.info("📂 Step 4: Train-Test Split")
     X = scaled_data[:-1]
     y = scaled_data[1:, close_index]
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, shuffle=False, test_size=0.2
-    )
+    X_train, X_test, y_train, y_test = train_test_split(X, y, shuffle=False, test_size=0.2)
     progress_bar.progress(60)
 
     # Step 5: Train
@@ -219,35 +226,25 @@ if st.button("🔍 Analyze"):
     predicted_full[0, close_index] = predicted_scaled
     predicted_price = scaler.inverse_transform(predicted_full)[0, close_index]
     current_price = float(df["Close"].iloc[-1])
-    recommendation, change_pct = make_recommendation(current_price, predicted_price)
+    recommendation, change_pct, suggestion_text = make_recommendation(current_price, predicted_price)
     progress_bar.progress(100)
     status.success("✅ Analysis complete!")
 
-    # Step 7: Charts
+    # Charts
     st.subheader("📊 Actual vs Predicted Close Price (Test Set)")
     fig = go.Figure()
     fig.add_trace(go.Scatter(y=y_test, mode="lines", name="Actual"))
     for name, pred in predictions.items():
-        fig.add_trace(
-            go.Scatter(y=pred, mode="lines", name=f"{name} ({scores[name]:.2f})")
-        )
-    fig.update_layout(
-        title="Actual vs Predicted",
-        xaxis_title="Time",
-        yaxis_title="Scaled Close",
-        height=500,
-    )
+        fig.add_trace(go.Scatter(y=pred, mode="lines", name=f"{name} ({scores[name]:.2f})"))
+    fig.update_layout(title="Actual vs Predicted", xaxis_title="Time", yaxis_title="Scaled Close", height=500)
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("📊 Model Accuracy Summary")
     for name, score in scores.items():
-        st.markdown(
-            f"**{name}** → R² Score: `{score:.2f}` → {r2_interpretation(score)}"
-        )
+        st.markdown(f"**{name}** → R² Score: `{score:.2f}` → {r2_interpretation(score)}")
 
     with st.expander("📘 R² Score Legend"):
-        st.markdown(
-            """
+        st.markdown("""
         **❌ Poor**: `0 or below`  
         **⚠️ Weak**: `0.0 – 0.3`  
         **😐 Moderate**: `0.3 – 0.5`  
@@ -255,16 +252,16 @@ if st.button("🔍 Analyze"):
         **✅ Good**: `0.7 – 0.9`  
         **🔏 Excellent**: `0.9 – 0.99`  
         **🚀 Perfect**: `1.0`  
-        """
-        )
+        """)
 
-    # Final result
+    # Final recommendation
     st.subheader("🔍 Final Recommendation")
     st.markdown(f"**Best Model**: `{best_model_name}`")
     st.markdown(f"**Current Close Price**: `{current_price:.2f}`")
     st.markdown(f"**Predicted Next Close**: `{predicted_price:.2f}`")
     st.markdown(f"**Expected Change**: `{change_pct:.2f}%`")
     st.markdown(f"**Action**: {recommendation}")
+    st.info(f"💬 {suggestion_text}")
 
     # News
     st.subheader("📰 News Sentiment Analysis")
