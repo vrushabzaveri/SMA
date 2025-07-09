@@ -120,16 +120,18 @@ if st.button("🔍 Analyze"):
     df.rename(columns={"Close": "Close", "Volume": "Volume"}, inplace=True)
 
     volume_missing = "Volume" not in df.columns
-    volume_null = False
-    volume_zero = False
+    volume_null, volume_zero = False, False
 
     if not volume_missing:
-        volume_series = df["Volume"]
-        volume_null = volume_series.isnull().all()
-        volume_zero = (volume_series == 0).all()
+        try:
+            volume_series = df["Volume"]
+            volume_null = bool(volume_series.isnull().all())
+            volume_zero = bool((volume_series == 0).all())
+        except Exception:
+            volume_null = False
+            volume_zero = False
 
-    if volume_missing or volume_null or volume_zero:
-
+    if bool(volume_missing) or bool(volume_null) or bool(volume_zero):
         status.warning("⚠️ Volume missing in yfinance. Fetching from Alpha Vantage...")
         fallback_volume = fetch_alpha_vantage_volume(symbol_raw)
         if not fallback_volume.empty:
