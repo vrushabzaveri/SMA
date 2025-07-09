@@ -81,7 +81,7 @@ def fetch_alpha_vantage_volume(symbol_raw):
 
 # ------------------ STREAMLIT CONFIG ------------------
 st.set_page_config(page_title="ISA Forecast", layout="wide")
-st.title("\ud83d\udcc8 ISA Stock Forecasting")
+st.title("ISA Stock Forecasting")
 
 @st.cache_data
 def fetch_static_stocks():
