@@ -15,16 +15,25 @@ from sklearn.svm import SVR
 from sklearn.neural_network import MLPRegressor
 from sklearn.model_selection import train_test_split
 import ta
+import warnings
+warnings.filterwarnings('ignore')
 
 ALPHA_VANTAGE_KEY = "HNU1UUHL9351CEWZ"
 
 # ------------------ UTILS ------------------
 def flatten_series(series_like):
+    """Safely flatten series-like objects to 1D pandas Series"""
     if isinstance(series_like, pd.DataFrame):
-        return series_like.iloc[:, 0]
+        if series_like.shape[1] == 1:
+            return series_like.iloc[:, 0]
+        else:
+            return series_like.squeeze()
     elif isinstance(series_like, np.ndarray):
-        return pd.Series(series_like.ravel())
-    return pd.Series(series_like).squeeze()
+        return pd.Series(series_like.flatten())
+    elif isinstance(series_like, pd.Series):
+        return series_like
+    else:
+        return pd.Series(series_like)
 
 def make_recommendation(current_price, predicted_price):
     change = ((predicted_price - current_price) / current_price) * 100
@@ -56,17 +65,23 @@ def r2_interpretation(score):
         return "🚀 Perfect (Possible Overfit)"
 
 def get_sentiment(text):
-    polarity = TextBlob(text).sentiment.polarity
-    if polarity > 0.2:
-        return "🟢 Positive"
-    elif polarity < -0.2:
-        return "🔴 Negative"
-    else:
+    try:
+        polarity = TextBlob(text).sentiment.polarity
+        if polarity > 0.2:
+            return "🟢 Positive"
+        elif polarity < -0.2:
+            return "🔴 Negative"
+        else:
+            return "🟡 Neutral"
+    except:
         return "🟡 Neutral"
 
 def fetch_news(company_name):
-    url = f"https://news.google.com/rss/search?q={company_name.replace(' ', '%20')}+stock&hl=en-IN&gl=IN&ceid=IN:en"
-    return feedparser.parse(url).entries[:5]
+    try:
+        url = f"https://news.google.com/rss/search?q={company_name.replace(' ', '%20')}+stock&hl=en-IN&gl=IN&ceid=IN:en"
+        return feedparser.parse(url).entries[:5]
+    except:
+        return []
 
 def fetch_alpha_vantage_volume(symbol_raw):
     try:
@@ -79,6 +94,34 @@ def fetch_alpha_vantage_volume(symbol_raw):
     except:
         return pd.Series(dtype="float64")
 
+def safe_technical_indicator(close_series, indicator_func, *args, **kwargs):
+    """Safely calculate technical indicators with proper error handling"""
+    try:
+        # Ensure we have a proper 1D pandas Series
+        if isinstance(close_series, pd.DataFrame):
+            close_series = close_series.squeeze()
+        
+        # Convert to pandas Series if it's not already
+        if not isinstance(close_series, pd.Series):
+            close_series = pd.Series(close_series)
+        
+        # Ensure numeric data
+        close_series = pd.to_numeric(close_series, errors='coerce')
+        
+        # Drop NaN values
+        close_series = close_series.dropna()
+        
+        # Check if we have enough data
+        if len(close_series) < 20:
+            return pd.Series(index=close_series.index, dtype=float)
+        
+        # Call the indicator function
+        return indicator_func(close_series, *args, **kwargs)
+    
+    except Exception as e:
+        st.warning(f"Error calculating indicator: {e}")
+        return pd.Series(index=close_series.index if hasattr(close_series, 'index') else range(len(close_series)), dtype=float)
+
 # ------------------ STREAMLIT CONFIG ------------------
 st.set_page_config(page_title="ISA Forecast", layout="wide")
 st.title("📈 ISA Stock Forecasting")
@@ -89,7 +132,14 @@ def fetch_static_stocks():
         df = pd.read_csv("nse_stocks.csv")
         return df[["SYMBOL", "NAME OF COMPANY"]].dropna()
     except:
-        return pd.DataFrame(columns=["SYMBOL", "NAME OF COMPANY"])
+        # Fallback with some common NSE stocks
+        fallback_data = {
+            "SYMBOL": ["RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "HINDUNILVR", "SBIN", "BHARTIARTL", "KOTAKBANK", "ITC"],
+            "NAME OF COMPANY": ["Reliance Industries Limited", "Tata Consultancy Services Limited", "HDFC Bank Limited", 
+                               "Infosys Limited", "ICICI Bank Limited", "Hindustan Unilever Limited", 
+                               "State Bank of India", "Bharti Airtel Limited", "Kotak Mahindra Bank Limited", "ITC Limited"]
+        }
+        return pd.DataFrame(fallback_data)
 
 stock_df = fetch_static_stocks()
 if stock_df.empty:
@@ -101,7 +151,7 @@ selected_company = st.selectbox("Choose a Company", company_options, format_func
 symbol = selected_company[1] + ".NS"
 symbol_raw = selected_company[1]
 
-start_date = st.date_input("Start Date", pd.to_datetime("2000-01-01"))
+start_date = st.date_input("Start Date", pd.to_datetime("2020-01-01"))
 end_date = st.date_input("End Date", pd.to_datetime("today"))
 
 st.markdown(f"**Selected Range:** `{start_date.strftime('%d/%m/%Y')} → {end_date.strftime('%d/%m/%Y')}`")
@@ -110,177 +160,266 @@ if st.button("🔍 Analyze"):
     progress_bar = st.progress(0)
     status = st.empty()
 
-    # Step 1: Download
-    status.info("⏳ Step 1: Downloading stock data...")
-    df = yf.download(symbol, start=start_date, end=end_date)
-    if df.empty:
-        st.error("⚠️ No data found.")
-        st.stop()
-    df = df[df.index.dayofweek < 5]
-    df.rename(columns={"Close": "Close", "Volume": "Volume"}, inplace=True)
-
-    volume_missing = "Volume" not in df.columns
-    volume_null, volume_zero = False, False
-
-    if not volume_missing:
-        try:
-            volume_series = df["Volume"]
-            volume_null = bool(volume_series.isnull().all())
-            volume_zero = bool((volume_series == 0).all())
-        except Exception:
-            volume_null = False
-            volume_zero = False
-
-    if bool(volume_missing) or bool(volume_null) or bool(volume_zero):
-        status.warning("⚠️ Volume missing in yfinance. Fetching from Alpha Vantage...")
-        fallback_volume = fetch_alpha_vantage_volume(symbol_raw)
-        if not fallback_volume.empty:
-            df = df.join(fallback_volume.rename("Volume"), how="left", rsuffix="_av")
-            df["Volume"] = df["Volume"].fillna(df.get("Volume_av", 0))
-            df.drop(columns=["Volume_av"], inplace=True, errors="ignore")
-            st.success("✅ Volume filled from Alpha Vantage.")
-        else:
-            df["Volume"] = 0
-    df["Volume"] = np.log1p(flatten_series(df["Volume"]))
-    progress_bar.progress(20)
-
-    # Step 2: Indicators
-    status.info("📊 Step 2: Calculating indicators...")
-    
-    # FIX: Ensure close_series is properly formatted for ta library
     try:
-        # Get the Close column and ensure it's a proper pandas Series
-        close_series = df["Close"].copy()
+        # Step 1: Download
+        status.info("⏳ Step 1: Downloading stock data...")
+        df = yf.download(symbol, start=start_date, end=end_date)
         
-        # Ensure we have a proper pandas Series with numeric data
-        if not isinstance(close_series, pd.Series):
-            close_series = pd.Series(close_series)
-        
-        # Convert to numeric, coercing errors to NaN
-        close_series = pd.to_numeric(close_series, errors='coerce')
-        
-        # Reset index to ensure proper Series format
-        close_series = close_series.reset_index(drop=True)
-        
-        # Convert to numpy array to avoid pandas boolean issues for validation
-        close_values = close_series.values
-        
-        # Check for null values using numpy
-        has_null_values = bool(np.isnan(close_values).any())
-        
-        # Check for insufficient data after cleaning
-        clean_close = close_series.dropna()
-        valid_data_count = len(clean_close)
-        has_insufficient_data = bool(valid_data_count < 20)
-        
-        # Now use standard Python boolean logic
-        if has_null_values or has_insufficient_data:
-            st.error(f"🚨 Not enough valid Close data to calculate indicators. Valid data points: {valid_data_count}")
+        if df.empty:
+            st.error("⚠️ No data found for the selected symbol and date range.")
             st.stop()
         
-        # Use the cleaned close series for calculations
-        # Create a temporary dataframe with the same index as the original
-        temp_df = df.copy()
-        temp_close = temp_df["Close"].fillna(method='ffill').fillna(method='bfill')
+        # Filter out weekends
+        df = df[df.index.dayofweek < 5]
         
-        # Calculate technical indicators with proper error handling
-        df["RSI"] = ta.momentum.RSIIndicator(close=temp_close).rsi()
-        macd = ta.trend.MACD(close=temp_close)
-        df["MACD"] = macd.macd()
-        df["MACD_Signal"] = macd.macd_signal()
-        df["Change %"] = temp_close.pct_change() * 100
+        # Ensure we have the basic columns
+        required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+        for col in required_columns:
+            if col not in df.columns:
+                if col == 'Volume':
+                    df[col] = 0
+                else:
+                    st.error(f"Missing required column: {col}")
+                    st.stop()
         
-        for period in [5, 10, 20, 50, 100, 200]:
-            df[f"SMA_{period}"] = ta.trend.sma_indicator(temp_close, window=period)
-            df[f"EMA_{period}"] = ta.trend.ema_indicator(temp_close, window=period)
+        progress_bar.progress(20)
+
+        # Step 2: Handle Volume data
+        status.info("📊 Step 2: Processing volume data...")
+        volume_series = df["Volume"]
+        
+        # Check if volume data is problematic
+        volume_issues = (
+            volume_series.isnull().all() or 
+            (volume_series == 0).all() or 
+            volume_series.empty
+        )
+        
+        if volume_issues:
+            status.warning("⚠️ Volume missing in yfinance. Fetching from Alpha Vantage...")
+            fallback_volume = fetch_alpha_vantage_volume(symbol_raw)
+            if not fallback_volume.empty:
+                df = df.join(fallback_volume.rename("Volume_AV"), how="left")
+                df["Volume"] = df["Volume"].fillna(df["Volume_AV"])
+                df.drop(columns=["Volume_AV"], inplace=True, errors="ignore")
+                st.success("✅ Volume filled from Alpha Vantage.")
+            else:
+                df["Volume"] = 1000  # Default volume
+        
+        # Apply log transformation to volume
+        df["Volume"] = np.log1p(df["Volume"].fillna(0))
+        progress_bar.progress(40)
+
+        # Step 3: Calculate Technical Indicators
+        status.info("📊 Step 3: Calculating technical indicators...")
+        
+        # Get close prices as a clean 1D Series
+        close_series = df["Close"].copy()
+        
+        # Ensure we have enough data
+        if len(close_series.dropna()) < 50:
+            st.error("🚨 Not enough data to calculate indicators. Need at least 50 data points.")
+            st.stop()
+        
+        # Calculate indicators safely
+        try:
+            # RSI
+            rsi_indicator = ta.momentum.RSIIndicator(close=close_series, window=14)
+            df["RSI"] = rsi_indicator.rsi()
             
-    except Exception as e:
-        st.error(f"Error calculating technical indicators: {e}")
-        st.error("This might be due to insufficient data or data format issues.")
-        st.stop()
+            # MACD
+            macd_indicator = ta.trend.MACD(close=close_series)
+            df["MACD"] = macd_indicator.macd()
+            df["MACD_Signal"] = macd_indicator.macd_signal()
+            
+            # Price change percentage
+            df["Change %"] = close_series.pct_change() * 100
+            
+            # Moving averages
+            periods = [5, 10, 20, 50, 100, 200]
+            for period in periods:
+                if len(close_series) >= period:
+                    df[f"SMA_{period}"] = ta.trend.sma_indicator(close_series, window=period)
+                    df[f"EMA_{period}"] = ta.trend.ema_indicator(close_series, window=period)
+            
+            # Bollinger Bands
+            bb_indicator = ta.volatility.BollingerBands(close=close_series)
+            df["BB_Upper"] = bb_indicator.bollinger_hband()
+            df["BB_Lower"] = bb_indicator.bollinger_lband()
+            
+        except Exception as e:
+            st.warning(f"Some technical indicators could not be calculated: {e}")
         
-    df.dropna(inplace=True)
-    progress_bar.progress(40)
+        # Remove rows with NaN values
+        df_clean = df.dropna()
+        
+        if len(df_clean) < 30:
+            st.error("🚨 Not enough clean data after calculating indicators.")
+            st.stop()
+        
+        progress_bar.progress(60)
 
-    # Step 3: Scaling
-    status.info("💡 Step 3: Scaling features...")
-    feature_cols = [col for col in df.columns if col != "Adj Close"]
-    close_index = feature_cols.index("Close")
-    data = df[feature_cols]
-    scaler = MinMaxScaler()
-    scaled_data = scaler.fit_transform(data)
-    progress_bar.progress(60)
+        # Step 4: Prepare data for ML
+        status.info("💡 Step 4: Preparing data for machine learning...")
+        
+        # Select feature columns (exclude Adj Close to avoid data leakage)
+        feature_cols = [col for col in df_clean.columns if col != "Adj Close"]
+        
+        # Get the index of Close column for prediction
+        close_index = feature_cols.index("Close")
+        
+        # Prepare the data
+        data = df_clean[feature_cols].values
+        
+        # Scale the data
+        scaler = MinMaxScaler()
+        scaled_data = scaler.fit_transform(data)
+        
+        progress_bar.progress(70)
 
-    # Step 4: Train-test split
-    status.info("📂 Step 4: Train-test split...")
-    X = scaled_data[:-1]
-    y = scaled_data[1:, close_index]
-    X_train, X_test, y_train, y_test = train_test_split(X, y, shuffle=False, test_size=0.2)
-    progress_bar.progress(70)
+        # Step 5: Train-test split
+        status.info("📂 Step 5: Creating train-test split...")
+        
+        # Create sequences for time series prediction
+        X = scaled_data[:-1]  # All but last row
+        y = scaled_data[1:, close_index]  # Close price of next day
+        
+        # Split data
+        split_idx = int(len(X) * 0.8)
+        X_train, X_test = X[:split_idx], X[split_idx:]
+        y_train, y_test = y[:split_idx], y[split_idx:]
+        
+        progress_bar.progress(80)
 
-    # Step 5: Modeling
-    status.info("🧠 Step 5: Training models...")
-    models = {
-        "SVM (Linear)": SVR(kernel="linear"),
-        "SVM (RBF)": SVR(kernel="rbf"),
-        "Random Forest": RandomForestRegressor(n_estimators=100),
-        "Linear Regression": LinearRegression(),
-        "Gradient Boosting": GradientBoostingRegressor(),
-        "ANN (MLP)": MLPRegressor(hidden_layer_sizes=(64, 64), max_iter=500),
-    }
-    best_score, best_model_name, best_model = -np.inf, None, None
-    predictions, scores = {}, {}
+        # Step 6: Train models
+        status.info("🧠 Step 6: Training machine learning models...")
+        
+        models = {
+            "Random Forest": RandomForestRegressor(n_estimators=100, random_state=42),
+            "Linear Regression": LinearRegression(),
+            "Gradient Boosting": GradientBoostingRegressor(random_state=42),
+            "SVM (RBF)": SVR(kernel="rbf", C=1.0, epsilon=0.1),
+        }
+        
+        best_score = -np.inf
+        best_model_name = None
+        best_model = None
+        predictions = {}
+        scores = {}
+        
+        for name, model in models.items():
+            try:
+                model.fit(X_train, y_train)
+                pred = model.predict(X_test)
+                r2 = r2_score(y_test, pred)
+                
+                predictions[name] = pred
+                scores[name] = r2
+                
+                if r2 > best_score:
+                    best_score = r2
+                    best_model_name = name
+                    best_model = model
+            except Exception as e:
+                st.warning(f"Error training {name}: {e}")
+                scores[name] = -1
+        
+        if best_model is None:
+            st.error("❌ No models could be trained successfully.")
+            st.stop()
+        
+        progress_bar.progress(90)
 
-    for name, model in models.items():
-        model.fit(X_train, y_train)
-        pred = model.predict(X_test)
-        r2 = r2_score(y_test, pred)
-        predictions[name] = pred
-        scores[name] = r2
-        if r2 > best_score:
-            best_score, best_model_name, best_model = r2, name, model
-    progress_bar.progress(90)
+        # Step 7: Make prediction
+        status.info("📈 Step 7: Making final prediction...")
+        
+        # Use the last data point to predict next day
+        last_day = scaled_data[-1].reshape(1, -1)
+        predicted_scaled = best_model.predict(last_day)[0]
+        
+        # Create full prediction array for inverse transform
+        predicted_full = last_day.copy()
+        predicted_full[0, close_index] = predicted_scaled
+        
+        # Inverse transform to get actual price
+        predicted_price = scaler.inverse_transform(predicted_full)[0, close_index]
+        current_price = float(df_clean["Close"].iloc[-1])
+        
+        # Generate recommendation
+        recommendation, change_pct, suggestion_text = make_recommendation(current_price, predicted_price)
+        
+        progress_bar.progress(100)
+        status.success("✅ Analysis complete!")
 
-    # Step 6: Prediction
-    status.info("📈 Final prediction...")
-    last_day = scaled_data[-1].reshape(1, -1)
-    predicted_scaled = best_model.predict(last_day)[0]
-    predicted_full = last_day.copy()
-    predicted_full[0, close_index] = predicted_scaled
-    predicted_price = scaler.inverse_transform(predicted_full)[0, close_index]
-    current_price = float(df["Close"].iloc[-1])
-    recommendation, change_pct, suggestion_text = make_recommendation(current_price, predicted_price)
-    progress_bar.progress(100)
-    status.success("✅ Done!")
+        # Display results
+        st.subheader("📊 Model Performance")
+        
+        # Plot actual vs predicted
+        if len(predictions) > 0:
+            fig = go.Figure()
+            
+            # Add actual values
+            fig.add_trace(go.Scatter(
+                y=y_test,
+                mode="lines",
+                name="Actual",
+                line=dict(color="blue", width=2)
+            ))
+            
+            # Add predictions
+            colors = ["red", "green", "orange", "purple", "brown"]
+            for i, (name, pred) in enumerate(predictions.items()):
+                if name in scores and scores[name] > -1:
+                    fig.add_trace(go.Scatter(
+                        y=pred,
+                        mode="lines",
+                        name=f"{name} (R²: {scores[name]:.3f})",
+                        line=dict(color=colors[i % len(colors)], width=1)
+                    ))
+            
+            fig.update_layout(
+                title="Actual vs Predicted Prices (Test Set)",
+                xaxis_title="Time",
+                yaxis_title="Scaled Price",
+                height=400
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("📊 Actual vs Predicted (Test Set)")
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(y=y_test, mode="lines", name="Actual"))
-    for name, pred in predictions.items():
-        fig.add_trace(go.Scatter(y=pred, mode="lines", name=f"{name} ({scores[name]:.2f})"))
-    st.plotly_chart(fig, use_container_width=True)
+        # Model scores
+        st.subheader("📋 Model Scores")
+        for name, score in scores.items():
+            if score > -1:
+                st.markdown(f"**{name}**: R² = `{score:.3f}` → {r2_interpretation(score)}")
 
-    st.subheader("📋 Model Scores")
-    for name, score in scores.items():
-        st.markdown(f"**{name}** → R²: `{score:.2f}` → {r2_interpretation(score)}")
+        # Final recommendation
+        st.subheader("🔍 Final Recommendation")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric("Current Price", f"₹{current_price:.2f}")
+            st.metric("Predicted Price", f"₹{predicted_price:.2f}")
+        
+        with col2:
+            st.metric("Expected Change", f"{change_pct:.2f}%")
+            st.markdown(f"**Best Model**: {best_model_name}")
+        
+        st.markdown(f"**Recommendation**: {recommendation}")
+        st.info(f"💬 {suggestion_text}")
 
-    st.subheader("🔍 Final Recommendation")
-    st.markdown(f"**Best Model**: `{best_model_name}`")
-    st.markdown(f"**Current Close Price**: `{current_price:.2f}`")
-    st.markdown(f"**Predicted Next Close**: `{predicted_price:.2f}`")
-    st.markdown(f"**Expected Change**: `{change_pct:.2f}%`")
-    st.markdown(f"**Action**: {recommendation}")
-    st.info(f"💬 {suggestion_text}")
+        # News sentiment
+        st.subheader("📰 Recent News Sentiment")
+        try:
+            news_articles = fetch_news(selected_company[0])
+            if news_articles:
+                for article in news_articles[:3]:
+                    sentiment = get_sentiment(article.title)
+                    st.markdown(f"**{sentiment}** [{article.title}]({article.link})")
+                    st.caption(f"📅 {getattr(article, 'published', 'Unknown date')}")
+            else:
+                st.warning("No recent news found.")
+        except Exception as e:
+            st.warning(f"Could not fetch news: {e}")
 
-    st.subheader("📰 News Sentiment")
-    try:
-        news_articles = fetch_news(selected_company[0])
-        if not news_articles:
-            st.warning("No recent news found.")
-        else:
-            for article in news_articles:
-                sentiment = get_sentiment(article.title)
-                st.markdown(f"**{sentiment}** [{article.title}]({article.link})")
-                st.caption(f"📅 {getattr(article, 'published', 'Unknown')}")
     except Exception as e:
-        st.error(f"❌ Failed to fetch news: {e}")
+        st.error(f"❌ An error occurred during analysis: {e}")
+        st.error("Please try with a different stock or date range.")
