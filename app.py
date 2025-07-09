@@ -2,8 +2,6 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import os
-import joblib
 import time
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import r2_score
@@ -17,10 +15,8 @@ from datetime import datetime
 from textblob import TextBlob
 import feedparser
 import ta
-import holidays
 
-
-# --------- Helpers ---------
+# ---------- HELPER FUNCTIONS ----------
 def flatten_series(series_like):
     if isinstance(series_like, pd.DataFrame):
         return series_like.iloc[:, 0]
@@ -28,14 +24,12 @@ def flatten_series(series_like):
         return pd.Series(series_like.ravel())
     return pd.Series(series_like).squeeze()
 
-
 def get_close_column(df, symbol):
     possible_cols = [col for col in df.columns if f"Close_{symbol}" in str(col)]
     if not possible_cols:
-        st.error(f"❌ Could not find a Close column for {symbol}. Found columns: {', '.join(map(str, df.columns))}")
+        st.error(f"❌ Couldn't find Close column for {symbol}. Columns: {df.columns.tolist()}")
         st.stop()
     return possible_cols[0]
-
 
 def make_recommendation(current_price, predicted_price):
     change = ((predicted_price - current_price) / current_price) * 100
@@ -50,12 +44,11 @@ def make_recommendation(current_price, predicted_price):
     else:
         return "🤝 Hold", change, "Not much change expected. Buying isn’t risky, but may not be rewarding either."
 
-
 def r2_interpretation(score):
     if score <= 0:
-        return "❌ Poor (Worse than random)"
+        return "❌ Poor"
     elif score <= 0.3:
-        return "⚠️ Weak Prediction"
+        return "⚠️ Weak"
     elif score <= 0.5:
         return "😐 Moderate"
     elif score <= 0.7:
@@ -65,8 +58,7 @@ def r2_interpretation(score):
     elif score < 1.0:
         return "🔏 Excellent"
     else:
-        return "🚀 Perfect (Possible overfit)"
-
+        return "🚀 Perfect (Possible Overfit)"
 
 def get_sentiment(text):
     polarity = TextBlob(text).sentiment.polarity
@@ -77,30 +69,24 @@ def get_sentiment(text):
     else:
         return "🟡 Neutral"
 
-
 def fetch_news(company_name):
     url = f"https://news.google.com/rss/search?q={company_name.replace(' ', '%20')}+stock&hl=en-IN&gl=IN&ceid=IN:en"
     return feedparser.parse(url).entries[:5]
 
+# ---------- CONFIG ----------
+st.set_page_config(page_title="ISA Forecast", layout="wide")
+st.title("📊 ISA Stock Forecasting")
 
-# --------- Config ---------
-st.set_page_config(page_title="ISA", layout="wide")
-st.title("ISA Forecast")
-SCALER_PATH = "scaler.gz"
-CSV_PATH = "nse_stocks.csv"
-
-
+# Load company list
 @st.cache_data
 def fetch_static_stocks():
     try:
-        df = pd.read_csv(CSV_PATH)
+        df = pd.read_csv("nse_stocks.csv")
         return df[["SYMBOL", "NAME OF COMPANY"]].dropna()
     except Exception as e:
-        st.error(f"❌ Failed to load nse_stocks.csv: {e}")
+        st.error(f"❌ Failed to load stock list: {e}")
         return pd.DataFrame(columns=["SYMBOL", "NAME OF COMPANY"])
 
-
-# --------- UI ---------
 stock_df = fetch_static_stocks()
 if stock_df.empty:
     st.stop()
@@ -110,32 +96,23 @@ selected_company = st.selectbox("Choose a Company", company_options, format_func
 symbol = selected_company[1] + ".NS"
 symbol_raw = selected_company[1]
 
-# Always reset the scaler cache on new stock selection
-if os.path.exists(SCALER_PATH):
-    os.remove(SCALER_PATH)
-
 start_date = st.date_input("Start Date", pd.to_datetime("2010-01-01"))
 end_date = st.date_input("End Date", pd.to_datetime("today"))
+
 st.markdown(f"**Selected Range:** `{start_date.strftime('%d/%m/%Y')} → {end_date.strftime('%d/%m/%Y')}`")
 
-if st.button("🗑️ Reset Scaler Cache"):
-    if os.path.exists(SCALER_PATH):
-        os.remove(SCALER_PATH)
-    st.success("✅ Scaler cache cleared!")
-
-# --------- Analyze Button ---------
 if st.button("🔍 Analyze"):
     start_time = time.time()
     progress_bar = st.progress(0)
     status = st.empty()
 
-    # Step 1: Download
+    # Step 1: Download Data
     status.info("⏳ Step 1: Downloading stock data...")
     df = yf.download(symbol, start=start_date, end=end_date)
     df.columns = ["_".join(col).strip() if isinstance(col, tuple) else col for col in df.columns]
     df = df[df.index.dayofweek < 5]
     if df.empty:
-        st.error("⚠️ No data available.")
+        st.error("⚠️ No data found.")
         st.stop()
     progress_bar.progress(15)
 
@@ -143,7 +120,7 @@ if st.button("🔍 Analyze"):
     status.info("📊 Step 2: Calculating indicators...")
     close_col = get_close_column(df, symbol)
     close_series = flatten_series(df[close_col])
-    df["Close"] = close_series  # for simplicity downstream
+    df["Close"] = close_series
 
     df["RSI"] = ta.momentum.RSIIndicator(close=close_series).rsi()
     macd = ta.trend.MACD(close=close_series)
@@ -160,40 +137,28 @@ if st.button("🔍 Analyze"):
     progress_bar.progress(30)
 
     # Step 3: Scaling
-    status.info("💡 Step 3: Scaling & preparing data...")
+    status.info("💡 Step 3: Scaling features...")
     feature_cols = [col for col in df.columns if col not in ["Adj Close"]]
     close_index = feature_cols.index("Close")
     data = df[feature_cols]
 
-    # Validate data before scaling
-    if data is None or data.empty:
-        st.error("🚨 Data is empty. Cannot scale.")
-        st.stop()
-    if data.isnull().values.any():
-        st.error("🚨 Data contains NaNs. Cannot scale.")
-        st.stop()
-    if not np.isfinite(data.to_numpy()).all():
-        st.error("🚨 Data contains infinite values. Cannot scale.")
+    if data.isnull().values.any() or not np.isfinite(data.to_numpy()).all():
+        st.error("🚨 Data contains NaNs or infinite values. Cannot proceed.")
         st.stop()
 
-    try:
-        scaler = MinMaxScaler()
-        scaler.fit(data)
-        joblib.dump(scaler, SCALER_PATH)
-        scaled_data = scaler.transform(data)
-    except Exception as e:
-        st.error(f"❌ Failed to scale data: {e}")
-        st.stop()
-    progress_bar.progress(45)
+    scaler = MinMaxScaler()
+    scaler.fit(data)
+    scaled_data = scaler.transform(data)
+    progress_bar.progress(50)
 
-    # Step 4: Split
-    status.info("📂 Step 4: Train-Test Split")
+    # Step 4: Train-test split
+    status.info("📂 Step 4: Splitting data...")
     X = scaled_data[:-1]
     y = scaled_data[1:, close_index]
     X_train, X_test, y_train, y_test = train_test_split(X, y, shuffle=False, test_size=0.2)
     progress_bar.progress(60)
 
-    # Step 5: Train
+    # Step 5: Model training
     status.info("🧠 Step 5: Training models...")
     models = {
         "SVM (Linear)": SVR(kernel="linear"),
@@ -206,8 +171,7 @@ if st.button("🔍 Analyze"):
 
     predictions, scores = {}, {}
     best_score, best_model_name, best_model = -np.inf, None, None
-    for i, (name, model) in enumerate(models.items(), start=1):
-        status.info(f"🚀 Training `{name}` ({i}/{len(models)})")
+    for name, model in models.items():
         model.fit(X_train, y_train)
         pred = model.predict(X_test)
         r2 = r2_score(y_test, pred)
@@ -215,11 +179,10 @@ if st.button("🔍 Analyze"):
         scores[name] = r2
         if r2 > best_score:
             best_score, best_model_name, best_model = r2, name, model
-
     progress_bar.progress(90)
 
     # Step 6: Final Prediction
-    status.info("📈 Final predictions...")
+    status.info("📈 Final prediction...")
     last_day = scaled_data[-1].reshape(1, -1)
     predicted_scaled = best_model.predict(last_day)[0]
     predicted_full = last_day.copy()
@@ -228,33 +191,23 @@ if st.button("🔍 Analyze"):
     current_price = float(df["Close"].iloc[-1])
     recommendation, change_pct, suggestion_text = make_recommendation(current_price, predicted_price)
     progress_bar.progress(100)
-    status.success("✅ Analysis complete!")
+    status.success("✅ Done!")
 
-    # Charts
-    st.subheader("📊 Actual vs Predicted Close Price (Test Set)")
+    # Step 7: Plot
+    st.subheader("📊 Actual vs Predicted (Test Set)")
     fig = go.Figure()
     fig.add_trace(go.Scatter(y=y_test, mode="lines", name="Actual"))
     for name, pred in predictions.items():
         fig.add_trace(go.Scatter(y=pred, mode="lines", name=f"{name} ({scores[name]:.2f})"))
-    fig.update_layout(title="Actual vs Predicted", xaxis_title="Time", yaxis_title="Scaled Close", height=500)
+    fig.update_layout(title="Actual vs Predicted", height=500)
     st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("📊 Model Accuracy Summary")
+    # Step 8: Summary
+    st.subheader("📋 Model Scores")
     for name, score in scores.items():
-        st.markdown(f"**{name}** → R² Score: `{score:.2f}` → {r2_interpretation(score)}")
+        st.markdown(f"**{name}** → R²: `{score:.2f}` → {r2_interpretation(score)}")
 
-    with st.expander("📘 R² Score Legend"):
-        st.markdown("""
-        **❌ Poor**: `0 or below`  
-        **⚠️ Weak**: `0.0 – 0.3`  
-        **😐 Moderate**: `0.3 – 0.5`  
-        **👍 Decent**: `0.5 – 0.7`  
-        **✅ Good**: `0.7 – 0.9`  
-        **🔏 Excellent**: `0.9 – 0.99`  
-        **🚀 Perfect**: `1.0`  
-        """)
-
-    # Final recommendation
+    # Final Rec
     st.subheader("🔍 Final Recommendation")
     st.markdown(f"**Best Model**: `{best_model_name}`")
     st.markdown(f"**Current Close Price**: `{current_price:.2f}`")
@@ -264,18 +217,15 @@ if st.button("🔍 Analyze"):
     st.info(f"💬 {suggestion_text}")
 
     # News
-    st.subheader("📰 News Sentiment Analysis")
+    st.subheader("📰 News Sentiment")
     try:
         news_articles = fetch_news(selected_company[0])
         if not news_articles:
             st.warning("No recent news found.")
         else:
             for article in news_articles:
-                title = article.title
-                link = article.link
-                published = article.published if "published" in article else "Unknown"
-                sentiment = get_sentiment(title)
-                st.markdown(f"**{sentiment}** [{title}]({link})")
-                st.caption(f"🗓 {published}")
+                sentiment = get_sentiment(article.title)
+                st.markdown(f"**{sentiment}** [{article.title}]({article.link})")
+                st.caption(f"🗓 {getattr(article, 'published', 'Unknown')}")
     except Exception as e:
-        st.error(f"🤨 News fetch failed: {e}")
+        st.error(f"❌ Failed to fetch news: {e}")
