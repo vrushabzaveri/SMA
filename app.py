@@ -50,7 +50,7 @@ if st.sidebar.button("Logout"):
     st.session_state.username = ""
     st.rerun()
 
-
+# 
 @st.cache_data
 def fetch_static_stocks():
     try:
