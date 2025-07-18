@@ -1,4 +1,5 @@
 import streamlit as st
+import bcrypt
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -15,9 +16,40 @@ import warnings
 warnings.filterwarnings("ignore")
 
 ALPHA_VANTAGE_KEY = "HNU1UUHL9351CEWZ"
-
 st.set_page_config(page_title="ISA Forecast", layout="wide")
-st.title("📈Stock Forecasting")
+
+# --- Login Logic ---
+def check_password(username, password):
+    if username in st.secrets["users"]:
+        stored_hash = st.secrets["users"][username].encode()
+        return bcrypt.checkpw(password.encode(), stored_hash)
+    return False
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+    st.session_state.username = ""
+
+if not st.session_state.authenticated:
+    st.title("🔐 Login Required")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    if st.button("Login"):
+        if check_password(username, password):
+            st.session_state.authenticated = True
+            st.session_state.username = username
+            st.rerun()
+        else:
+            st.error("Invalid username or password")
+    st.stop()
+
+# --- Authenticated Area ---
+st.title("📈 Stock Forecasting App")
+st.sidebar.success(f"👋 Logged in as **{st.session_state.username}**")
+if st.sidebar.button("Logout"):
+    st.session_state.authenticated = False
+    st.session_state.username = ""
+    st.rerun()
+
 
 @st.cache_data
 def fetch_static_stocks():
@@ -33,16 +65,11 @@ def fetch_static_stocks():
 def make_recommendation(current_price, predicted_price, r2_score=None):
     change = ((predicted_price - current_price) / current_price) * 100
     confidence = ""
-
     if r2_score is not None:
-        if r2_score > 0.85:
-            confidence = "🔒 Very High Confidence"
-        elif r2_score > 0.70:
-            confidence = "🔐 High Confidence"
-        elif r2_score > 0.50:
-            confidence = "🔓 Moderate Confidence"
-        else:
-            confidence = "⚠️ Low Confidence"
+        if r2_score > 0.85: confidence = "🔒 Very High Confidence"
+        elif r2_score > 0.70: confidence = "🔐 High Confidence"
+        elif r2_score > 0.50: confidence = "🔓 Moderate Confidence"
+        else: confidence = "⚠️ Low Confidence"
 
     if change > 5:
         rec = "🔥 Strong Buy"
@@ -65,12 +92,9 @@ def make_recommendation(current_price, predicted_price, r2_score=None):
 def get_sentiment(text):
     try:
         polarity = TextBlob(text).sentiment.polarity
-        if polarity > 0.2:
-            return "🟢 Positive"
-        elif polarity < -0.2:
-            return "🔴 Negative"
-        else:
-            return "🟡 Neutral"
+        if polarity > 0.2: return "🟢 Positive"
+        elif polarity < -0.2: return "🔴 Negative"
+        else: return "🟡 Neutral"
     except:
         return "🟡 Neutral"
 
@@ -123,8 +147,7 @@ if st.button("🔍 Analyze"):
             st.stop()
 
         close_col_candidates = [col for col in df.columns if "close" in col.lower()]
-        actual_close_col = close_col_candidates[0]
-        df['Close'] = df[actual_close_col]
+        df['Close'] = df[close_col_candidates[0]]
         close_series = df['Close']
 
         if "Volume" not in df.columns:
@@ -153,7 +176,6 @@ if st.button("🔍 Analyze"):
         bb = ta.volatility.BollingerBands(close_series)
         df["BB_Upper"] = bb.bollinger_hband()
         df["BB_Lower"] = bb.bollinger_lband()
-
         df.dropna(inplace=True)
 
         if len(df) < 30:
@@ -162,7 +184,6 @@ if st.button("🔍 Analyze"):
 
         scaler = MinMaxScaler()
         scaled_data = scaler.fit_transform(df)
-
         close_index = df.columns.get_loc("Close")
         X = scaled_data[:-1]
         y = scaled_data[1:, close_index]
@@ -193,66 +214,42 @@ if st.button("🔍 Analyze"):
                 best_score = r2
                 best_model = model
 
-        # 1. Graph First
         st.subheader("🧠 Combined Model Prediction vs Actual")
-        combined_fig = go.Figure()
-        combined_fig.add_trace(go.Scatter(
-            y=y_test,
-            mode='lines',
-            name='Actual',
-            line=dict(color='white', width=2)
-        ))
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(y=y_test, name="Actual", line=dict(color="white", width=2)))
+        for i, (name, result) in enumerate(model_results.items()):
+            fig.add_trace(go.Scatter(y=result["preds"], name=name, line=dict(width=2)))
+        fig.update_layout(height=500, title="Model Comparison")
+        st.plotly_chart(fig, use_container_width=True)
 
-        colors = ["orange", "green", "purple", "red"]
-        for (name, result), color in zip(model_results.items(), colors):
-            combined_fig.add_trace(go.Scatter(
-                y=result["preds"],
-                mode='lines',
-                name=name,
-                line=dict(color=color, width=2)
-            ))
-
-        combined_fig.update_layout(
-            title="All Models - Actual vs Predicted",
-            xaxis_title="Time (Index)",
-            yaxis_title="Scaled Close Price",
-            height=500
-        )
-        st.plotly_chart(combined_fig, use_container_width=True)
-
-        # 2. Model Evaluation
         st.subheader("📊 Model Evaluation Results")
         latest_price = df["Close"].iloc[-2]
         actual_price = df["Close"].iloc[-1]
-
-        best_final_rec = None
-        best_final_msg = None
-        best_final_model = None
+        best_final_rec, best_final_msg, best_final_model = "", "", ""
 
         for name, result in model_results.items():
             r2 = result["r2"]
-            predicted_scaled = result["preds"][-1]
+            pred_scaled = result["preds"][-1]
             try:
                 test_sample = X_test[-1].copy()
-                test_sample[close_index] = predicted_scaled
+                test_sample[close_index] = pred_scaled
                 predicted_price = scaler.inverse_transform([test_sample])[0][close_index]
             except:
                 predicted_price = actual_price
 
-            rec, change, rec_msg = make_recommendation(latest_price, predicted_price, r2)
-            if result["r2"] == best_score:
+            rec, change, msg = make_recommendation(latest_price, predicted_price, r2)
+            if r2 == best_score:
                 best_final_rec = rec
-                best_final_msg = rec_msg
+                best_final_msg = msg
                 best_final_model = name
 
             st.markdown(f"""
             #### 🧠 {name}
             - **R² Score:** `{r2:.4f}`
             - **Predicted Price:** ₹`{predicted_price:.2f}`
-            - **Recommendation:** {rec} — *{rec_msg}*
+            - **Recommendation:** {rec} — *{msg}*
             """)
 
-        # 3. Final Decision Summary
         st.subheader("✅ Final Decision")
         st.markdown(f"""
         Based on the best performing model (**{best_final_model}**), the final recommendation is:
@@ -261,7 +258,6 @@ if st.button("🔍 Analyze"):
         > _{best_final_msg}_
         """)
 
-        # 4. News Section
         st.subheader("📰 Latest News")
         news = fetch_news(selected_company[0])
         if not news:
