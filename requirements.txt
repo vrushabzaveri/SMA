@@ -9,3 +9,4 @@ textblob
 feedparser
 ta
 holidays
+bcrypt
